@@ -20,6 +20,7 @@ import           Data.Attoparsec.ByteString.Char8
 import qualified Data.ByteString                  as S
 import           Data.ByteString.Char8            (readInteger)
 import qualified Data.ByteString.Char8            as C
+import           Data.Char                        (isAsciiUpper)
 import           Data.Int
 import qualified Data.Map                         as M
 import           Data.Word
@@ -36,9 +37,7 @@ separator = count 2 (char8 ':') <?> "separator"
 
 -- | Matches the key in check result output.
 ident :: Parser S.ByteString
-ident = takeWhile uppercase <?> "item identifier"
-  where
-    uppercase = inClass $ enumFromTo 'A' 'Z'
+ident = takeWhile isAsciiUpper <?> "item identifier"
 
 -- | Matches the value in check result output.
 val :: Parser S.ByteString
@@ -50,7 +49,7 @@ val = takeTill isTabOrEol <?> "item value"
 item :: Parser Item
 item = Item `fmap` ident <* separator <*> val <* skipWhile isTab <?> "perfdata item"
   where
-    isTab = (==) '\t'
+    isTab = (== '\t')
 
 -- | Matches a line of key::value pairs (i.e., the result of one check).
 line :: Parser [Item]
@@ -71,78 +70,68 @@ parseLine = parse line
 -- either fail or succeed here and return a ParserError or an ItemMap
 -- respectively.
 extractItems :: Result [Item] -> Either ParserError ItemMap
-extractItems (Done _ is) = Right $ mapItems is
-extractItems (Fail _ ctxs err) = Left $ fmtParseError ctxs err
-extractItems (Partial f) = extractItems (f "")
+extractItems (Done _ is)       = pure $ mapItems is
+extractItems (Fail _ ctxs err) = fail $ fmtParseError ctxs err
+extractItems (Partial f)       = extractItems (f "")
 
 -- | Called if the check output is from a service check. Returns the
 -- service-specific component of the perfdata.
 parseServiceData :: ItemMap -> Either ParserError ServicePerfdata
-parseServiceData m = case M.lookup "SERVICEDESC" m of
-    Nothing -> Left ("SERVICEDESC not found in " ++ show m)
-    Just desc -> case M.lookup "SERVICESTATE" m of
-        Nothing -> Left "SERVICESTATE not found"
-        Just sState -> case parseOnly parseReturnState sState of
-            Right st -> Right $ ServicePerfdata desc st
-            _ -> Left ("invalid service state " ++ C.unpack sState)
+parseServiceData m = do
+    desc   <- maybe (fail $ "SERVICEDESC not found in " ++ show m) pure $ M.lookup "SERVICEDESC"  m
+    sState <- maybe (fail "SERVICESTATE not found")                pure $ M.lookup "SERVICESTATE" m
+    case parseOnly parseReturnState sState of
+      Right st -> pure $ ServicePerfdata desc st
+      _ -> fail ("invalid service state " ++ C.unpack sState)
 
 -- | Whether this perfdata item is for a host check or a service check
 -- (or Nothing on failure to determine).
 parseDataType :: ItemMap -> Either ParserError HostOrService
-parseDataType m = case M.lookup "DATATYPE" m of
-    Nothing -> Left "DATATYPE not found"
-    Just s -> case s of
-        "HOSTPERFDATA" -> Right Host
-        "SERVICEPERFDATA" -> case parseServiceData m of
-            Left err -> Left err
-            Right d -> Right $ Service d
-        _                 -> Left "Invalid datatype"
+parseDataType m = do
+    s <- maybe (fail "DATATYPE not found") pure $ M.lookup "DATATYPE" m
+    case s of
+        "HOSTPERFDATA" -> pure Host
+        "SERVICEPERFDATA" -> Service <$> parseServiceData m
+        _                 -> fail "Invalid datatype"
 
 parseHostname :: ItemMap -> Either ParserError S.ByteString
-parseHostname m = case M.lookup "HOSTNAME" m of
-    Nothing -> Left "HOSTNAME not found"
-    Just h -> Right h
+parseHostname m = maybe (fail "HOSTNAME not found") pure $ M.lookup "HOSTNAME" m
 
 parseTimestamp :: ItemMap -> Either ParserError Int64
-parseTimestamp m = case M.lookup "TIMET" m of
-    Nothing -> Left "TIMET not found"
-    Just t  -> case readInteger t of
-        Nothing -> Left "Invalid timestamp"
-        Just (n, _) -> Right $ fromInteger (n * nanosecondFactor)
+parseTimestamp m = do
+    t <- maybe (fail "TIMET not found") pure $ M.lookup "TIMET" m
+    n <- maybe (fail "Invalid timestamp") (pure . fst) $ readInteger t
+    pure $ fromInteger (n * nanosecondFactor)
   where
     nanosecondFactor = 1000000000
 
 parseHostState :: ItemMap -> Either ParserError S.ByteString
-parseHostState m = case M.lookup "HOSTSTATE" m of
-    Nothing -> Left "HOSTSTATE not found"
-    Just s -> Right s
+parseHostState m = maybe (fail "HOSTSTATE not found") pure $ M.lookup "HOSTSTATE" m
 
 parseHostMetrics :: ItemMap -> Either ParserError MetricList
-parseHostMetrics m = case M.lookup "HOSTPERFDATA" m of
-    Nothing -> Left "HOSTPERFDATA not found"
-    Just p  -> parseMetricString p
+parseHostMetrics m = maybe (fail "HOSTPERFDATA not found") parseMetricString
+                                                     $ M.lookup "HOSTPERFDATA" m
 
 parseServiceMetrics :: ItemMap -> Either ParserError MetricList
-parseServiceMetrics m = case M.lookup "SERVICEPERFDATA" m of
-    Nothing -> Left "SERVICEPERFDATA not found"
-    Just p  -> parseMetricString p
+parseServiceMetrics m = maybe (fail "SERVICEPERFDATA not found") parseMetricString
+                                                  $ M.lookup "SERVICEPERFDATA" m 
 
 -- | Given an item map extracted from a check result, parse and return
 -- the performance metrics (or store an error and return Nothing).
 parseMetrics :: HostOrService -> ItemMap -> Either ParserError MetricList
 parseMetrics typ m = case typ of
-     Host -> parseHostMetrics m
+     Host      -> parseHostMetrics m
      Service _ -> parseServiceMetrics m
 
 -- | Given an item map extracted from a check result, parse and return
 -- a Perfdata object.
 extractPerfdata :: ItemMap -> Either ParserError Perfdata
 extractPerfdata m = do
-    typ <- parseDataType m
-    name <- parseHostname m
-    t <- parseTimestamp m
+    typ   <- parseDataType m
+    name  <- parseHostname m
+    t     <- parseTimestamp m
     state <- parseHostState m
-    ms <- parseMetrics typ m
+    ms    <- parseMetrics typ m
     return $ Perfdata typ t (C.unpack name) (Just state) ms
 
 -- | Extract perfdata from a Nagios perfdata item formatted according to
