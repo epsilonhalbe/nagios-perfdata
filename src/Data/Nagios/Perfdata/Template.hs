@@ -17,9 +17,10 @@ import           Data.Nagios.Perfdata.Metric
 
 import           Control.Applicative
 import           Data.Attoparsec.ByteString.Char8
-import qualified Data.ByteString                  as S
+import           Data.ByteString                  (ByteString)
+import qualified Data.ByteString                  as B
 import           Data.ByteString.Char8            (readInteger)
-import qualified Data.ByteString.Char8            as C
+import qualified Data.ByteString.Char8            as B8
 import           Data.Char                        (isAsciiUpper)
 import           Data.Int
 import qualified Data.Map                         as M
@@ -27,8 +28,8 @@ import           Data.Word
 import           Prelude                          hiding (takeWhile)
 
 data Item = Item {
-    label   :: S.ByteString,
-    content :: S.ByteString
+    label   :: B.ByteString,
+    content :: B.ByteString
 } deriving (Show)
 
 -- | Matches the '::' separating items in check result output.
@@ -36,11 +37,11 @@ separator :: Parser [Word8]
 separator = count 2 (char8 ':') <?> "separator"
 
 -- | Matches the key in check result output.
-ident :: Parser S.ByteString
+ident :: Parser ByteString
 ident = takeWhile isAsciiUpper <?> "item identifier"
 
 -- | Matches the value in check result output.
-val :: Parser S.ByteString
+val :: Parser ByteString
 val = takeTill isTabOrEol <?> "item value"
   where
     isTabOrEol c = c == '\t' || c == '\n'
@@ -56,14 +57,14 @@ line :: Parser [Item]
 line = many item <?> "perfdata line"
 
 -- | Map from key to value for items in a check result.
-type ItemMap = M.Map S.ByteString S.ByteString
+type ItemMap = M.Map ByteString ByteString
 
 -- | Insert items from a list into a map for easy access by key.
 mapItems :: [Item] -> ItemMap
 mapItems = foldl (\m i -> M.insert (label i) (content i) m) M.empty
 
 -- | Parse the output from a Nagios check.
-parseLine :: S.ByteString -> Result [Item]
+parseLine :: ByteString -> Result [Item]
 parseLine = parse line
 
 -- | We have no more data to give the parser at this point, so we
@@ -78,50 +79,44 @@ extractItems (Partial f)       = extractItems (f "")
 -- service-specific component of the perfdata.
 parseServiceData :: ItemMap -> Either ParserError ServicePerfdata
 parseServiceData m = do
-    desc   <- maybe (fail $ "SERVICEDESC not found in " ++ show m) pure $ M.lookup "SERVICEDESC"  m
-    sState <- maybe (fail "SERVICESTATE not found")                pure $ M.lookup "SERVICESTATE" m
+    desc   <- lookupOrFail "SERVICEDESC"  m
+    sState <- lookupOrFail "SERVICESTATE" m
     case parseOnly parseReturnState sState of
       Right st -> pure $ ServicePerfdata desc st
-      _ -> fail ("invalid service state " ++ C.unpack sState)
+      _ -> fail ("invalid service state " ++ B8.unpack sState)
 
 -- | Whether this perfdata item is for a host check or a service check
 -- (or Nothing on failure to determine).
 parseDataType :: ItemMap -> Either ParserError HostOrService
 parseDataType m = do
-    s <- maybe (fail "DATATYPE not found") pure $ M.lookup "DATATYPE" m
+    s <- lookupOrFail "DATATYPE" m
     case s of
         "HOSTPERFDATA" -> pure Host
         "SERVICEPERFDATA" -> Service <$> parseServiceData m
         _                 -> fail "Invalid datatype"
 
-parseHostname :: ItemMap -> Either ParserError S.ByteString
-parseHostname m = maybe (fail "HOSTNAME not found") pure $ M.lookup "HOSTNAME" m
+parseHostname :: ItemMap -> Either ParserError ByteString
+parseHostname = lookupOrFail "HOSTNAME"
 
 parseTimestamp :: ItemMap -> Either ParserError Int64
 parseTimestamp m = do
-    t <- maybe (fail "TIMET not found") pure $ M.lookup "TIMET" m
+    t <- lookupOrFail "TIMET" m
     n <- maybe (fail "Invalid timestamp") (pure . fst) $ readInteger t
     pure $ fromInteger (n * nanosecondFactor)
   where
     nanosecondFactor = 1000000000
 
-parseHostState :: ItemMap -> Either ParserError S.ByteString
-parseHostState m = maybe (fail "HOSTSTATE not found") pure $ M.lookup "HOSTSTATE" m
-
-parseHostMetrics :: ItemMap -> Either ParserError MetricList
-parseHostMetrics m = maybe (fail "HOSTPERFDATA not found") parseMetricString
-                                                     $ M.lookup "HOSTPERFDATA" m
-
-parseServiceMetrics :: ItemMap -> Either ParserError MetricList
-parseServiceMetrics m = maybe (fail "SERVICEPERFDATA not found") parseMetricString
-                                                  $ M.lookup "SERVICEPERFDATA" m 
+parseHostState :: ItemMap -> Either ParserError ByteString
+parseHostState = lookupOrFail "HOSTSTATE"
 
 -- | Given an item map extracted from a check result, parse and return
 -- the performance metrics (or store an error and return Nothing).
 parseMetrics :: HostOrService -> ItemMap -> Either ParserError MetricList
-parseMetrics typ m = case typ of
-     Host      -> parseHostMetrics m
-     Service _ -> parseServiceMetrics m
+parseMetrics typ m =
+  let typ' = case typ of Host      -> "HOST"
+                         Service _ -> "SERVICE"
+  in maybe (fail (typ' ++ "PERFDATA not found")) parseMetricString $
+        M.lookup (B8.pack $ typ' ++ "PERFDATA") m
 
 -- | Given an item map extracted from a check result, parse and return
 -- a Perfdata object.
@@ -132,7 +127,7 @@ extractPerfdata m = do
     t     <- parseTimestamp m
     state <- parseHostState m
     ms    <- parseMetrics typ m
-    return $ Perfdata typ t (C.unpack name) (Just state) ms
+    return $ Perfdata typ t (B8.unpack name) (Just state) ms
 
 -- | Extract perfdata from a Nagios perfdata item formatted according to
 -- the default template[0]. This is the format that is used in the
@@ -143,8 +138,11 @@ extractPerfdata m = do
 --   "[SERVICEPERFDATA]\t$TIMET$\t$HOSTNAME$\t$SERVICEDESC$\t$SERVICEEXECUTIONTIME$\t$SERVICELATENCY$\t$SERVICEOUTPUT$\t$SERVICEPERFDATA$"
 -- Host perfdata:
 --   "[HOSTPERFDATA]\t$TIMET$\t$HOSTNAME$\t$HOSTEXECUTIONTIME$\t$HOSTOUTPUT$\t$HOSTPERFDATA$"
-perfdataFromDefaultTemplate :: S.ByteString -> Either ParserError Perfdata
+perfdataFromDefaultTemplate :: ByteString -> Either ParserError Perfdata
 perfdataFromDefaultTemplate s =
     getItems s >>= extractPerfdata
   where
     getItems = extractItems . parseLine
+
+lookupOrFail :: Monad m => ByteString -> ItemMap -> m ByteString
+lookupOrFail str m = maybe (fail $ B8.unpack str ++ "not found") pure $ M.lookup str m
