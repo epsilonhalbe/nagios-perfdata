@@ -30,44 +30,44 @@ data Item = Item {
     content :: S.ByteString
 } deriving (Show)
 
--- |Matches the '::' separating items in check result output.
+-- | Matches the '::' separating items in check result output.
 separator :: Parser [Word8]
 separator = count 2 (char8 ':') <?> "separator"
 
--- |Matches the key in check result output.
+-- | Matches the key in check result output.
 ident :: Parser S.ByteString
 ident = takeWhile uppercase <?> "item identifier"
   where
     uppercase = inClass $ enumFromTo 'A' 'Z'
 
--- |Matches the value in check result output.
+-- | Matches the value in check result output.
 val :: Parser S.ByteString
 val = takeTill isTabOrEol <?> "item value"
   where
     isTabOrEol c = c == '\t' || c == '\n'
 
--- |Matches a key::value pair in check result output.
+-- | Matches a key::value pair in check result output.
 item :: Parser Item
 item = Item `fmap` ident <* separator <*> val <* skipWhile isTab <?> "perfdata item"
   where
     isTab = (==) '\t'
 
--- |Matches a line of key::value pairs (i.e., the result of one check).
+-- | Matches a line of key::value pairs (i.e., the result of one check).
 line :: Parser [Item]
 line = many item <?> "perfdata line"
 
--- |Map from key to value for items in a check result.
+-- | Map from key to value for items in a check result.
 type ItemMap = M.Map S.ByteString S.ByteString
 
--- |Insert items from a list into a map for easy access by key.
+-- | Insert items from a list into a map for easy access by key.
 mapItems :: [Item] -> ItemMap
 mapItems = foldl (\m i -> M.insert (label i) (content i) m) M.empty
 
--- |Parse the output from a Nagios check.
+-- | Parse the output from a Nagios check.
 parseLine :: S.ByteString -> Result [Item]
 parseLine = parse line
 
--- |We have no more data to give the parser at this point, so we
+-- | We have no more data to give the parser at this point, so we
 -- either fail or succeed here and return a ParserError or an ItemMap
 -- respectively.
 extractItems :: Result [Item] -> Either ParserError ItemMap
@@ -75,18 +75,18 @@ extractItems (Done _ is) = Right $ mapItems is
 extractItems (Fail _ ctxs err) = Left $ fmtParseError ctxs err
 extractItems (Partial f) = extractItems (f "")
 
--- |Called if the check output is from a service check. Returns the
+-- | Called if the check output is from a service check. Returns the
 -- service-specific component of the perfdata.
 parseServiceData :: ItemMap -> Either ParserError ServicePerfdata
 parseServiceData m = case M.lookup "SERVICEDESC" m of
     Nothing -> Left ("SERVICEDESC not found in " ++ show m)
     Just desc -> case M.lookup "SERVICESTATE" m of
         Nothing -> Left "SERVICESTATE not found"
-        Just sState -> case parseReturnState sState of
-            Nothing -> Left ("invalid service state " ++ C.unpack sState)
-            Just st -> Right $ ServicePerfdata desc st
+        Just sState -> case parseOnly parseReturnState sState of
+            Right st -> Right $ ServicePerfdata desc st
+            _ -> Left ("invalid service state " ++ C.unpack sState)
 
--- |Whether this perfdata item is for a host check or a service check
+-- | Whether this perfdata item is for a host check or a service check
 -- (or Nothing on failure to determine).
 parseDataType :: ItemMap -> Either ParserError HostOrService
 parseDataType m = case M.lookup "DATATYPE" m of
@@ -127,14 +127,14 @@ parseServiceMetrics m = case M.lookup "SERVICEPERFDATA" m of
     Nothing -> Left "SERVICEPERFDATA not found"
     Just p  -> parseMetricString p
 
--- |Given an item map extracted from a check result, parse and return
+-- | Given an item map extracted from a check result, parse and return
 -- the performance metrics (or store an error and return Nothing).
 parseMetrics :: HostOrService -> ItemMap -> Either ParserError MetricList
 parseMetrics typ m = case typ of
      Host -> parseHostMetrics m
      Service _ -> parseServiceMetrics m
 
--- |Given an item map extracted from a check result, parse and return
+-- | Given an item map extracted from a check result, parse and return
 -- a Perfdata object.
 extractPerfdata :: ItemMap -> Either ParserError Perfdata
 extractPerfdata m = do
@@ -145,7 +145,7 @@ extractPerfdata m = do
     ms <- parseMetrics typ m
     return $ Perfdata typ t (C.unpack name) (Just state) ms
 
--- |Extract perfdata from a Nagios perfdata item formatted according to
+-- | Extract perfdata from a Nagios perfdata item formatted according to
 -- the default template[0]. This is the format that is used in the
 -- perfdata spool files and consumed by pnp4nagios.
 --

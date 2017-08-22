@@ -8,98 +8,63 @@
 
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Data.Nagios.Perfdata.Metric(
     Perfdata(..),
     MetricList,
     Metric(..),
-    MetricValue(..),
+    critValue,
+    maxValue,
+    minValue,
+    warnValue,
+    MetricValue,
     HostOrService(..),
     ServicePerfdata(..),
-    uomFromString,
+    perfdataHostState,
+    perfdataHostname,
+    perfdataTimestamp,
+    perfdataType,
     parseReturnCode,
     parseReturnState,
     parseMetricString,
+    isUnknownMetricValue,
     UOM(..),
+    parseUOM,
     ReturnState(..),
-    Threshold(..),
+    Threshold,
     perfdataServiceDescription,
     metricValueDefault,
-    unknownMetricValue,
     isMetricBase,
     convertMetricToBase,
-    convertPerfdataToBase
-) where
+    convertPerfdataToBase,
+    ) where
 
 import           Data.Nagios.Perfdata.Error
 
 import           Control.Applicative
 import           Control.Monad
+import           Data.Maybe
 import           Data.Attoparsec.ByteString.Char8
-import           Data.Bifunctor                   (second)
 import qualified Data.ByteString                  as S
 import           Data.Int
+import           Control.Lens
+import           Safe                             (toEnumMay)
+
 import           Prelude                          hiding (takeWhile)
 
--- |Value of a performance metric. We may lose some data converting
+-- | Value of a performance metric. We may lose some data converting
 -- to doubles here; this may change in the future.
-data MetricValue = DoubleValue Double | UnknownValue deriving (Show, Eq)
+type MetricValue = Maybe Double
 
--- |Value of a min/max/warn/crit threshold, subject to the same
+-- | Value of a min/max/warn/crit threshold, subject to the same
 -- constraints as MetricValue.
-data Threshold = DoubleThreshold Double | NoThreshold deriving (Show)
+type Threshold = Maybe Double
 
--- |Encapsulates the data in a Nagios performance metric. A service can
--- have several of these.
-data Metric = Metric {
-    metricValue :: MetricValue,
-    metricUOM   :: UOM,
-    warnValue   :: Threshold,
-    critValue   :: Threshold,
-    minValue    :: Threshold,
-    maxValue    :: Threshold
-} deriving (Show)
-
-metricValueDefault :: Metric -> Double -> Double
-metricValueDefault Metric{..} d = case metricValue of
-    UnknownValue -> d
-    DoubleValue x -> x
-
-unknownMetricValue :: Metric -> Bool
-unknownMetricValue m = case metricValue m of
-    UnknownValue -> True
-    _ -> False
-
--- |List of metrics by metric name.
+-- | List of metrics by metric name.
 type MetricList = [(String, Metric)]
-
--- |Nagios unit of measurement. NullUnit is an empty string in the
--- check result; UnknownUOM indicates a failure to parse.
-data UOM = Second | Millisecond | Microsecond | Percent | Byte | Kilobyte | Megabyte | Gigabyte | Terabyte | Counter | NullUnit | UnknownUOM
-    deriving (Eq)
-
-instance Show UOM where
-    show Second      = "s"
-    show Percent     = "%"
-    show Byte        = "B"
-    show Counter     = "c"
-    show NullUnit    = ""
-    show UnknownUOM  = "?"
-    show uom         = show (uomToPrefix uom) ++ show (uomToBase uom)
-
-uomFromString :: String -> UOM
-uomFromString "s"  = Second
-uomFromString "ms" = Millisecond
-uomFromString "us" = Microsecond
-uomFromString "%"  = Percent
-uomFromString "B"  = Byte
-uomFromString "KB" = Kilobyte
-uomFromString "MB" = Megabyte
-uomFromString "GB" = Gigabyte
-uomFromString "TB" = Terabyte
-uomFromString "c"  = Counter
-uomFromString ""   = NullUnit
-uomFromString _    = UnknownUOM
 
 data Prefix = Base | Milli | Micro | Kilo | Mega | Giga | Tera
     deriving (Eq)
@@ -113,142 +78,193 @@ instance Show Prefix where
     show Giga  = "G"
     show Tera  = "T"
 
-uomToPrefix :: UOM -> Prefix
-uomToPrefix Second      = Base
-uomToPrefix Millisecond = Milli
-uomToPrefix Microsecond = Micro
-uomToPrefix Percent     = Base
-uomToPrefix Byte        = Base
-uomToPrefix Kilobyte    = Kilo
-uomToPrefix Megabyte    = Mega
-uomToPrefix Gigabyte    = Giga
-uomToPrefix Terabyte    = Tera
-uomToPrefix Counter     = Base
-uomToPrefix NullUnit    = Base
-uomToPrefix UnknownUOM  = Base
+-- | Nagios unit of measurement. NullUnit is an empty string in the
+-- check result; UnknownUOM indicates a failure to parse.
+data UOM = Second | Millisecond | Microsecond | Percent | Byte | Kilobyte
+         | Megabyte | Gigabyte | Terabyte | Counter | NullUnit | UnknownUOM
+    deriving (Eq)
 
-uomToBase :: UOM -> UOM
-uomToBase Second      = Second
-uomToBase Millisecond = Second
-uomToBase Microsecond = Second
-uomToBase Percent     = Percent
-uomToBase Byte        = Byte
-uomToBase Kilobyte    = Byte
-uomToBase Megabyte    = Byte
-uomToBase Gigabyte    = Byte
-uomToBase Terabyte    = Byte
-uomToBase Counter     = Counter
-uomToBase NullUnit    = NullUnit
-uomToBase UnknownUOM  = UnknownUOM
+toPrefix :: UOM -> Prefix
+{-# INLINE toPrefix #-}
+toPrefix Second      = Base
+toPrefix Millisecond = Milli
+toPrefix Microsecond = Micro
+toPrefix Percent     = Base
+toPrefix Byte        = Base
+toPrefix Kilobyte    = Kilo
+toPrefix Megabyte    = Mega
+toPrefix Gigabyte    = Giga
+toPrefix Terabyte    = Tera
+toPrefix Counter     = Base
+toPrefix NullUnit    = Base
+toPrefix UnknownUOM  = Base
 
-prefixToScale :: Prefix -> Double
-prefixToScale Base  = 1
-prefixToScale Milli = 0.001
-prefixToScale Micro = 0.000001
-prefixToScale Kilo  = 1000
-prefixToScale Mega  = 1000000
-prefixToScale Giga  = 1000000000
-prefixToScale Tera  = 1000000000000
+toBase :: UOM -> UOM
+{-# INLINE toBase #-}
+toBase Second      = Second
+toBase Millisecond = Second
+toBase Microsecond = Second
+toBase Percent     = Percent
+toBase Byte        = Byte
+toBase Kilobyte    = Byte
+toBase Megabyte    = Byte
+toBase Gigabyte    = Byte
+toBase Terabyte    = Byte
+toBase Counter     = Counter
+toBase NullUnit    = NullUnit
+toBase UnknownUOM  = UnknownUOM
 
-uomToScale :: UOM -> Double
-uomToScale = prefixToScale . uomToPrefix
+instance Show UOM where
+    show Second      = "s"
+    show Percent     = "%"
+    show Byte        = "B"
+    show Counter     = "c"
+    show NullUnit    = ""
+    show UnknownUOM  = "?"
+    show uom         = show (toPrefix uom) ++ show (toBase uom)
 
-convertUnitToBase :: MetricValue -> UOM -> (MetricValue, UOM)
-convertUnitToBase UnknownValue uom = (UnknownValue, uom)
-convertUnitToBase (DoubleValue v) uom = (DoubleValue $ uomToScale uom * v, uomToBase uom)
+-- | Encapsulates the data in a Nagios performance metric. A service can
+-- have several of these.
+data Metric = Metric {
+    _metricValue :: MetricValue,
+    _metricUOM   :: UOM,
+    _warnValue   :: Threshold,
+    _critValue   :: Threshold,
+    _minValue    :: Threshold,
+    _maxValue    :: Threshold
+} deriving (Show, Eq)
 
-convertMetricToBase :: Metric -> Metric
-convertMetricToBase m@Metric{..} = m{metricValue = v, metricUOM = uom}
-    where
-        (v, uom) = convertUnitToBase metricValue metricUOM
-
-isMetricBase :: Metric -> Bool
-isMetricBase Metric{..} = metricUOM == uomToBase metricUOM
-
-convertPerfdataToBase :: Perfdata -> Perfdata
-convertPerfdataToBase p@Perfdata{..} = p{perfdataMetrics = map (second convertMetricToBase ) perfdataMetrics}
-
--- |The part of the check result that's specific to service checks,
+$(makeLenses ''Metric)
+--
+-- | The part of the check result that's specific to service checks,
 -- and doesn't appear in host checks.
 data ServicePerfdata = ServicePerfdata {
     serviceDescription :: S.ByteString,
-    serviceState       :: ReturnState
-} deriving (Show)
+    serviceState       :: !ReturnState
+    } deriving (Show, Eq)
 
--- |The check type, either Service with associated ServiceData or Host.
-data HostOrService = Service ServicePerfdata | Host deriving (Show)
+-- | The check type, either Service with associated ServiceData or Host.
+data HostOrService = Service ServicePerfdata
+                   | Host
+                   deriving (Show, Eq)
 
-data ReturnState = OKState | WarningState | CriticalState | UnknownState deriving (Show,Enum)
+data ReturnState = OKState
+                 | WarningState
+                 | CriticalState
+                 | UnknownState
+                 deriving (Show,Eq, Enum, Bounded)
 
-parseReturnCode :: Integral a => a -> Maybe ReturnState
-parseReturnCode 0 = Just OKState
-parseReturnCode 1 = Just WarningState
-parseReturnCode 2 = Just CriticalState
-parseReturnCode 3 = Just UnknownState
-parseReturnCode _ = Nothing
-
-parseReturnState :: S.ByteString -> Maybe ReturnState
-parseReturnState "OK" = Just OKState
-parseReturnState "WARNING" = Just WarningState
-parseReturnState "CRITICAL" = Just CriticalState
-parseReturnState "UNKNOWN" = Just UnknownState
-parseReturnState _ = Nothing
-
--- |Encapsulates all the data in a check result that's relevant to
+-- | Encapsulates all the data in a check result that's relevant to
 -- metrics (we throw away things like the state type of HARD/SOFT).
 data Perfdata = Perfdata {
-    perfdataType      :: HostOrService,
-    perfdataTimestamp :: Int64,
-    perfdataHostname  :: String,
-    perfdataHostState :: Maybe S.ByteString,
-    perfdataMetrics   :: MetricList
-} deriving (Show)
+    _perfdataType      :: !HostOrService,
+    _perfdataTimestamp :: !Int64,
+    _perfdataHostname  :: !String,
+    _perfdataHostState :: Maybe S.ByteString,
+    _perfdataMetrics   :: MetricList
+    } deriving (Show, Eq)
+
+$(makeLenses ''Perfdata)
+
+metricValueDefault :: Double -> Metric -> Double
+metricValueDefault d = fromMaybe d . _metricValue
+
+isUnknownMetricValue :: Metric -> Bool
+isUnknownMetricValue = isNothing . _metricValue
+
+
+prefixToScale :: Prefix -> Double
+{-# INLINE prefixToScale #-}
+prefixToScale Micro =               0.000001
+prefixToScale Milli =               0.001
+prefixToScale Base  =             1.0
+prefixToScale Kilo  =          1000.0
+prefixToScale Mega  =       1000000.0
+prefixToScale Giga  =    1000000000.0
+prefixToScale Tera  = 1000000000000.0
+
+toScale :: UOM -> Double -> Double
+toScale = (*) . prefixToScale . toPrefix
+
+convertUnitToBase :: (MetricValue, UOM) -> (MetricValue, UOM)
+convertUnitToBase (x@(Just _), uom)  = (toScale uom <$> x, toBase uom)
+convertUnitToBase x = x
+
+convertMetricToBase :: Metric -> Metric
+convertMetricToBase m = m & metricValue .~ v
+                          & metricUOM   .~ uom
+    where (v, uom) = convertUnitToBase (m^.metricValue , m^.metricUOM)
+
+isMetricBase :: Metric -> Bool
+isMetricBase Metric{..} = _metricUOM == toBase _metricUOM
+
+convertPerfdataToBase :: Perfdata -> Perfdata
+convertPerfdataToBase = perfdataMetrics.mapped._2 %~ convertMetricToBase
+
+parseReturnCode :: Int -> Maybe ReturnState
+parseReturnCode = toEnumMay
+
+parseReturnState :: Parser ReturnState
+parseReturnState = choice
+                 [ string "OK"       *> pure OKState
+                 , string "WARNING"  *> pure WarningState
+                 , string "CRITICAL" *> pure CriticalState
+                 , string "UNKNOWN"  *> pure UnknownState
+                 , fail "Expected one of [OK, WARNING, CRITICAL, UNKNOWN]"
+                 ]
 
 perfdataServiceDescription :: Perfdata -> S.ByteString
-perfdataServiceDescription datum = case perfdataType datum of
+perfdataServiceDescription datum = case _perfdataType datum of
     Host -> "host"
     Service serviceData -> serviceDescription serviceData
 
-uomParser :: Parser UOM
-uomParser = liftM uomFromString . option "" $ many (satisfy uomChar)
-  where
-    uomChar = inClass "A-Za-z%"
+parseUOM :: Parser UOM
+parseUOM = choice [ string "s"  *> pure Second
+                  , string "ms" *> pure Millisecond
+                  , string "us" *> pure Microsecond
+                  , string "%"  *> pure Percent
+                  , string "B"  *> pure Byte
+                  , string "KB" *> pure Kilobyte
+                  , string "MB" *> pure Megabyte
+                  , string "GB" *> pure Gigabyte
+                  , string "TB" *> pure Terabyte
+                  , string "c"  *> pure Counter
+                  , pure . maybe NullUnit (const UnknownUOM) =<< peekChar
+                  ]
 
 metricName :: Parser String
 metricName = option quote (char quote) *>
-             many (satisfy nameChar) <*
+             many (satisfy nameChar)   <*
              option quote (char quote)
   where
     quote = '\''
-    nameChar '\'' = False
-    nameChar '='  = False
-    nameChar _    = True
+    nameChar = notInClass "'="
 
 value :: Parser MetricValue
-value = option UnknownValue $ liftM DoubleValue double
+value = option Nothing $ fmap Just double
 
 threshold :: Parser Threshold
 threshold = char8 ';' *> thresholdValue
             <|> thresholdValue
   where
-    thresholdValue = option NoThreshold (liftM DoubleThreshold double)
+    thresholdValue = option Nothing (fmap Just double)
 
 metric :: Parser (String, Metric)
 metric = do
     name <- metricName
     void $ char8 '='
     m    <- Metric `fmap` value <*>
-                          uomParser <*>
+                          parseUOM <*>
                           threshold <*>
                           threshold <*>
                           threshold <*>
                           threshold
-    return (name, m)
+    pure (name, m)
 
 metricLine :: Parser MetricList
 metricLine = many (metric <* (skipMany (char8 ';') <* skipSpace))
 
--- |Parse the component of the check output which contains the
+-- | Parse the component of the check output which contains the
 -- performance metrics (HOSTPERFDATA or SERVICEPERFDATA).
 parseMetricString :: S.ByteString -> Either ParserError MetricList
 parseMetricString = completeParse . parse metricLine

@@ -2,8 +2,11 @@
 
 module Main where
 
+import           Control.Arrow               ((&&&))
 import           Control.Monad.IO.Class
-import           Data.ByteString             (ByteString)
+import           Data.Attoparsec.ByteString  (parseOnly)
+import           Data.ByteString.Char8       (ByteString, unpack)
+import           Data.Either
 import           Data.Either.Utils
 import           Data.Nagios.Perfdata
 import           Data.Nagios.Perfdata.Metric
@@ -30,61 +33,59 @@ suite :: Spec
 suite = do
     describe "perfdataFromDefaultTemplate" $ do
         it "extracts perfdata from Nagios perfdata template"  $
-            perfdataFromDefaultTemplate defaultTemplateData `shouldSatisfy` good
+            perfdataFromDefaultTemplate defaultTemplateData `shouldSatisfy` isRight
         it "extracts timestamp correctly" $
-            (perfdataTimestamp . fromRight $ perfdataFromDefaultTemplate defaultTemplateData) @?= 1388445486000000000
+            (_perfdataTimestamp . fromRight $ perfdataFromDefaultTemplate defaultTemplateData) @?= 1388445486000000000
         it "handles empty threshold fields correctly" $ do
             let datum = perfdataFromDefaultTemplate cpuTemplateData
-            datum `shouldSatisfy` good
+            datum `shouldSatisfy` isRight
             liftIO . print $ datum
-            let _:(metric,_):_ = perfdataMetrics . fromRight $ datum
+            let _:(metric,_):_ = _perfdataMetrics . fromRight $ datum
             metric @?= "CpuUser"
         it "handles full threshold fields correctly" $ do
             let datum = perfdataFromDefaultTemplate ntpTemplateData
-            datum `shouldSatisfy` good
+            datum `shouldSatisfy` isRight
             liftIO . print $ datum
-            let (metric,_):_ = perfdataMetrics . fromRight $ datum
+            let (metric,_):_ = _perfdataMetrics . fromRight $ datum
             metric @?= "offset"
         it "parses known values correctly" $ do
             let datum = perfdataFromDefaultTemplate ntpTemplateData
-            let (_,m):_ = perfdataMetrics . fromRight $ datum
-            metricValueDefault m (-1.0) @?= 0.001416
-            unknownMetricValue m @?= False
+            let (_,m):_ = _perfdataMetrics . fromRight $ datum
+            metricValueDefault (-1.0) m @?= 0.001416
+            isUnknownMetricValue m @?= False
     describe "perfdataFromModGearmanResult" $
         it "extracts perfdata from Nagios check result"  $ do
             let datum = perfdataFromGearmanResult defaultModGearmanResult
-            datum `shouldSatisfy` good
+            datum `shouldSatisfy` isRight
             liftIO . print $ datum
-            let (metric,_):_ = perfdataMetrics . fromRight $ datum
+            let (metric,_):_ = _perfdataMetrics . fromRight $ datum
             metric @?= "procs"
     describe "UOM conversions+parsing" $ do
-        it "converts all strings to UOMs correctly" $ do
-            map uomFromString testStrings @?= testUOMs
+        it "converts all strings to UOMs correctly" $
+            traverse (parseOnly parseUOM) testStrings @?= Right testUOMs
         it "converts all UOMs to strings correctly" $ do
             let len = length testUOMs - 2
-            map show (take len testUOMs) @?= (take len testStrings)
+            map show (take len testUOMs) @?= map unpack (take len testStrings)
             show UnknownUOM @?= "?"
         it "correctly verifies when metrics use a base SI unit" $ do
-            (isMetricBase $ simpleMetric (DoubleValue 42.00) Second     ) @?= True
-            (isMetricBase $ simpleMetric (DoubleValue 12.34) Millisecond) @?= False
-            (isMetricBase $ simpleMetric (DoubleValue 52.13) Byte       ) @?= True
-            (isMetricBase $ simpleMetric (DoubleValue 52.13) Counter    ) @?= True
-            (isMetricBase $ simpleMetric (DoubleValue 52.13) Gigabyte   ) @?= False
+            isMetricBase (simpleMetric (Just 42.00) Second     ) @?= True
+            isMetricBase (simpleMetric (Just 12.34) Millisecond) @?= False
+            isMetricBase (simpleMetric (Just 52.13) Byte       ) @?= True
+            isMetricBase (simpleMetric (Just 52.13) Counter    ) @?= True
+            isMetricBase (simpleMetric (Just 52.13) Gigabyte   ) @?= False
         it "correctly converts metrics to use base SI units" $ do
-            let metrics = [simpleMetric UnknownValue Second, simpleMetric (DoubleValue 123) Second, simpleMetric (DoubleValue 0.5) Kilobyte]
+            let metrics = [simpleMetric Nothing Second, simpleMetric (Just 123) Second, simpleMetric (Just 0.5) Kilobyte]
             let converted = map convertMetricToBase metrics
-            let expectedValues = [UnknownValue, DoubleValue 123, DoubleValue 500]
+            let expectedValues = [Nothing, Just 123, Just 500]
             let expectedUOMs = [Second, Second, Byte]
-            let (values, uoms) = unzip $ map (\x -> (metricValue x, metricUOM x)) converted
+            let (values, uoms) = unzip $ map  (_metricValue &&& _metricUOM) converted
             values @?= expectedValues
             uoms   @?= expectedUOMs
 
   where
-    good (Left _) = False
-    good (Right _) = True
-    simpleMetric mValue uom = Metric mValue uom NoThreshold NoThreshold NoThreshold NoThreshold
-    testStrings = ["s",    "ms",       "us",         "",       "%",     "B",  "KB",     "MB",     "GB",     "TB",     "c",     "x",        "maryhadalittlelamb"]
-    testUOMs = [Second, Millisecond, Microsecond, NullUnit, Percent, Byte, Kilobyte, Megabyte, Gigabyte, Terabyte, Counter, UnknownUOM, UnknownUOM]
+    simpleMetric mValue uom = Metric mValue uom Nothing Nothing Nothing Nothing
+    testStrings = [   "s",        "ms",        "us",       "",     "%",  "B",     "KB",     "MB",     "GB",     "TB",     "c",        "x", "maryhadalittlelamb"]
+    testUOMs    = [Second, Millisecond, Microsecond, NullUnit, Percent, Byte, Kilobyte, Megabyte, Gigabyte, Terabyte, Counter, UnknownUOM,           UnknownUOM]
 
 main :: IO ()
 main = hspec suite
