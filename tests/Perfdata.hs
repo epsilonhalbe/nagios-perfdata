@@ -40,26 +40,28 @@ suite = do
             let datum = perfdataFromDefaultTemplate cpuTemplateData
             datum `shouldSatisfy` isRight
             liftIO . print $ datum
-            let _:(metric,_):_ = _perfdataMetrics . fromRight $ datum
-            metric @?= "CpuUser"
+            let (_:m:_) = _perfdataMetrics . fromRight $ datum
+            _metricName m @?= "CpuUser"
         it "handles full threshold fields correctly" $ do
             let datum = perfdataFromDefaultTemplate ntpTemplateData
             datum `shouldSatisfy` isRight
-            liftIO . print $ datum
-            let (metric,_):_ = _perfdataMetrics . fromRight $ datum
-            metric @?= "offset"
+            {-liftIO . print $ datum-}
+            let (metric:_) = _perfdataMetrics . fromRight $ datum
+            _metricName metric @?= "offset"
         it "parses known values correctly" $ do
             let datum = perfdataFromDefaultTemplate ntpTemplateData
-            let (_,m):_ = _perfdataMetrics . fromRight $ datum
+            datum `shouldSatisfy` isRight
+            {-liftIO . print $ datum-}
+            let (m:_) = _perfdataMetrics . fromRight $ datum
             metricValueDefault (-1.0) m @?= 0.001416
             isUnknownMetricValue m @?= False
     describe "perfdataFromModGearmanResult" $
         it "extracts perfdata from Nagios check result"  $ do
             let datum = perfdataFromGearmanResult defaultModGearmanResult
             datum `shouldSatisfy` isRight
-            liftIO . print $ datum
-            let (metric,_):_ = _perfdataMetrics . fromRight $ datum
-            metric @?= "procs"
+            {-liftIO . print $ datum-}
+            let (m:_) = _perfdataMetrics . fromRight $ datum
+            _metricName m @?= "procs"
     describe "UOM conversions+parsing" $ do
         it "converts all strings to UOMs correctly" $
             traverse (parseOnly parseUOM) testStrings @?= Right testUOMs
@@ -83,7 +85,7 @@ suite = do
             uoms   @?= expectedUOMs
 
   where
-    simpleMetric mValue uom = Metric mValue uom Nothing Nothing Nothing Nothing
+    simpleMetric mValue uom = Metric "" mValue uom Nothing Nothing Nothing Nothing
     testStrings = [   "s",        "ms",        "us",       "",     "%",  "B",     "KB",     "MB",     "GB",     "TB",     "c",        "x", "maryhadalittlelamb"]
     testUOMs    = [Second, Millisecond, Microsecond, NullUnit, Percent, Byte, Kilobyte, Megabyte, Gigabyte, Terabyte, Counter, UnknownUOM,           UnknownUOM]
 

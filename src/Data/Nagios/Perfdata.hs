@@ -12,7 +12,6 @@ module Data.Nagios.Perfdata(
     perfdataFromGearmanResult,
     perfdataFromDefaultTemplate,
     Perfdata(..),
-    MetricList,
     Metric(..),
     HostOrService,
     ServicePerfdata,

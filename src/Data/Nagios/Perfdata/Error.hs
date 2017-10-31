@@ -6,15 +6,13 @@
 -- available to you by its authors as open source software: you can
 -- redistribute it and/or modify it under the terms of the BSD license.
 
-{-# LANGUAGE OverloadedStrings #-}
-
 module Data.Nagios.Perfdata.Error(
     fmtParseError,
     ParserError
 ) where
 
-import           Data.List hiding (takeWhile)
-import           Prelude   hiding (takeWhile)
+import           Data.List (intercalate)
+import           Prelude
 
 type ParserError = String
 

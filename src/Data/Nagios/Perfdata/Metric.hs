@@ -14,8 +14,9 @@
 
 module Data.Nagios.Perfdata.Metric(
     Perfdata(..),
-    MetricList,
     Metric(..),
+    metricName,
+    metricValue,
     critValue,
     maxValue,
     minValue,
@@ -48,7 +49,7 @@ import           Control.Applicative
 import           Control.Monad
 import           Data.Maybe
 import           Data.Attoparsec.ByteString.Char8
-import qualified Data.ByteString                  as S
+import qualified Data.ByteString                  as B
 import           Data.Int
 import           Control.Lens
 import           Safe                             (toEnumMay)
@@ -63,11 +64,8 @@ type MetricValue = Maybe Double
 -- constraints as MetricValue.
 type Threshold = Maybe Double
 
--- | List of metrics by metric name.
-type MetricList = [(String, Metric)]
-
 data Prefix = Base | Milli | Micro | Kilo | Mega | Giga | Tera
-    deriving (Eq)
+    deriving (Eq, Bounded, Enum)
 
 instance Show Prefix where
     show Base  = ""
@@ -82,7 +80,7 @@ instance Show Prefix where
 -- check result; UnknownUOM indicates a failure to parse.
 data UOM = Second | Millisecond | Microsecond | Percent | Byte | Kilobyte
          | Megabyte | Gigabyte | Terabyte | Counter | NullUnit | UnknownUOM
-    deriving (Eq)
+    deriving (Eq, Enum, Bounded)
 
 toPrefix :: UOM -> Prefix
 {-# INLINE toPrefix #-}
@@ -126,6 +124,7 @@ instance Show UOM where
 -- | Encapsulates the data in a Nagios performance metric. A service can
 -- have several of these.
 data Metric = Metric {
+    _metricName  :: String,
     _metricValue :: MetricValue,
     _metricUOM   :: UOM,
     _warnValue   :: Threshold,
@@ -139,7 +138,7 @@ $(makeLenses ''Metric)
 -- | The part of the check result that's specific to service checks,
 -- and doesn't appear in host checks.
 data ServicePerfdata = ServicePerfdata {
-    serviceDescription :: S.ByteString,
+    serviceDescription :: B.ByteString,
     serviceState       :: !ReturnState
     } deriving (Show, Eq)
 
@@ -156,12 +155,13 @@ data ReturnState = OKState
 
 -- | Encapsulates all the data in a check result that's relevant to
 -- metrics (we throw away things like the state type of HARD/SOFT).
-data Perfdata = Perfdata {
-    _perfdataType      :: !HostOrService,
-    _perfdataTimestamp :: !Int64,
-    _perfdataHostname  :: !String,
-    _perfdataHostState :: Maybe S.ByteString,
-    _perfdataMetrics   :: MetricList
+data Perfdata = Perfdata
+    { _perfdataType      :: !HostOrService
+    , _perfdataTimestamp :: !Int64
+    , _perfdataHostname  :: !String
+    , _perfdataHostState :: Maybe B.ByteString
+    , _perfdataMetrics   :: [Metric]
+    {-, _perfdataHostCheckcommand :: Maybe B.ByteString-}
     } deriving (Show, Eq)
 
 $(makeLenses ''Perfdata)
@@ -199,7 +199,7 @@ isMetricBase :: Metric -> Bool
 isMetricBase Metric{..} = _metricUOM == toBase _metricUOM
 
 convertPerfdataToBase :: Perfdata -> Perfdata
-convertPerfdataToBase = perfdataMetrics.mapped._2 %~ convertMetricToBase
+convertPerfdataToBase = perfdataMetrics.mapped %~ convertMetricToBase
 
 parseReturnCode :: Int -> Maybe ReturnState
 parseReturnCode = toEnumMay
@@ -213,7 +213,7 @@ parseReturnState = choice
                  , fail "Expected one of [OK, WARNING, CRITICAL, UNKNOWN]"
                  ]
 
-perfdataServiceDescription :: Perfdata -> S.ByteString
+perfdataServiceDescription :: Perfdata -> B.ByteString
 perfdataServiceDescription datum = case _perfdataType datum of
     Host -> "host"
     Service serviceData -> serviceDescription serviceData
@@ -232,8 +232,8 @@ parseUOM = choice [ string "s"  *> pure Second
                   , pure . maybe NullUnit (const UnknownUOM) =<< peekChar
                   ]
 
-metricName :: Parser String
-metricName = option quote (char quote) *>
+name :: Parser String
+name = option quote (char quote) *>
              many (satisfy nameChar)   <*
              option quote (char quote)
   where
@@ -249,27 +249,27 @@ threshold = char8 ';' *> thresholdValue
   where
     thresholdValue = option Nothing (fmap Just double)
 
-metric :: Parser (String, Metric)
+metric :: Parser Metric
 metric = do
-    name <- metricName
+    _metricName <- name
     void $ char8 '='
-    m    <- Metric `fmap` value <*>
-                          parseUOM <*>
-                          threshold <*>
-                          threshold <*>
-                          threshold <*>
-                          threshold
-    pure (name, m)
+    _metricValue <- value
+    _metricUOM   <- parseUOM
+    _warnValue   <- threshold
+    _critValue   <- threshold
+    _minValue    <- threshold
+    _maxValue    <- threshold
+    pure Metric{..}
 
-metricLine :: Parser MetricList
+metricLine :: Parser [Metric]
 metricLine = many (metric <* (skipMany (char8 ';') <* skipSpace))
 
 -- | Parse the component of the check output which contains the
 -- performance metrics (HOSTPERFDATA or SERVICEPERFDATA).
-parseMetricString :: S.ByteString -> Either ParserError MetricList
+parseMetricString :: B.ByteString -> Either ParserError [Metric]
 parseMetricString = completeParse . parse metricLine
   where
     completeParse r = case r of
-        Done _ m -> Right m
-        Fail _ ctxs err -> Left $ fmtParseError ctxs err
+        Done _ m          -> Right m
+        Fail _ ctxs err   -> Left $ fmtParseError ctxs err
         Partial parseRest -> completeParse (parseRest "")

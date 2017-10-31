@@ -17,8 +17,8 @@ import           Data.Nagios.Perfdata.Metric
 
 import           Control.Applicative
 import           Data.Attoparsec.ByteString.Char8
-import qualified Data.ByteString                  as S
-import qualified Data.ByteString.Char8            as C
+import           Data.ByteString                  (ByteString)
+import qualified Data.ByteString.Char8            as B8
 import           Data.Int
 import qualified Data.Map                         as M
 import           Prelude                          hiding (takeWhile)
@@ -55,19 +55,19 @@ checkTimestamp m =
     case M.lookup "finish_time" m of
         Nothing -> Left "finish_time not found"
         Just t  -> do
-            x <- parseDouble (C.pack t)
+            x <- parseDouble (B8.pack t)
             return $ floor  $ x * nanosecondFactor
   where
     nanosecondFactor = 1000000000
 
-parseDouble :: C.ByteString -> Either ParserError Double
+parseDouble :: B8.ByteString -> Either ParserError Double
 parseDouble s = complete (parse double s)
   where
     complete (Done _ i) = Right i
     complete (Fail _ ctxs err) = Left $ fmtParseError ctxs err
     complete (Partial f) = complete (f "")
 
-parsePluginOutput :: S.ByteString -> Either ParserError String
+parsePluginOutput :: ByteString -> Either ParserError String
 parsePluginOutput s = complete (parse metricSection s)
   where
     complete (Done _ i) = Right i
@@ -75,13 +75,13 @@ parsePluginOutput s = complete (parse metricSection s)
     complete (Partial f) = complete (f "")
     metricSection = manyTill anyChar (char '|') *> many1 anyChar
 
-checkMetrics :: CheckResultMap -> Either ParserError MetricList
+checkMetrics :: CheckResultMap -> Either ParserError [Metric]
 checkMetrics m =
     case M.lookup "output" m of
         Nothing -> Left "check output not found"
         Just s -> do
-            metricPart <- parsePluginOutput (C.pack s)
-            parseMetricString (C.pack metricPart)
+            metricPart <- parsePluginOutput (B8.pack s)
+            parseMetricString (B8.pack metricPart)
 
 checkHostname :: CheckResultMap -> Either ParserError String
 checkHostname m =
@@ -93,7 +93,7 @@ checkServiceState :: CheckResultMap -> Either ParserError ReturnState
 checkServiceState m =
     case M.lookup "return_code" m of
         Nothing -> Left "return_code not found"
-        Just d  -> case C.readInt (C.pack d) of
+        Just d  -> case B8.readInt (B8.pack d) of
             Nothing -> Left "could not parse return code as an integer"
             Just (r,_) -> case parseReturnCode r of
                 Nothing -> Left "invalid return code"
@@ -104,11 +104,11 @@ checkType m =
     case M.lookup "service_description" m of
         Nothing -> Right Host
         Just sd -> do
-            sd' <- Right (C.pack sd)
+            sd' <- Right (B8.pack sd)
             state <-  checkServiceState m
             return $ Service $ ServicePerfdata sd' state
 
-extractCheckItems :: S.ByteString -> Either ParserError CheckResultMap
+extractCheckItems :: ByteString -> Either ParserError CheckResultMap
 extractCheckItems = extractResultItems . parse checkResult
 
 -- |Takes the output of a Nagios check formatted according to [0] and
@@ -118,7 +118,7 @@ extractCheckItems = extractResultItems . parse checkResult
 --
 -- [0]: https://nagios-plugins.org/doc/guidelines.html
 -- [1]: https://labs.consol.de/nagios/mod-gearman/
-perfdataFromGearmanResult :: S.ByteString -> Either ParserError Perfdata
+perfdataFromGearmanResult :: ByteString -> Either ParserError Perfdata
 perfdataFromGearmanResult s = do
     m <- extractCheckItems s
     typ <- checkType m

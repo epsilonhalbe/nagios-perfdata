@@ -8,9 +8,16 @@
 
 {-# LANGUAGE OverloadedStrings #-}
 
-module Data.Nagios.Perfdata.Template(
-    perfdataFromDefaultTemplate,
-) where
+module Data.Nagios.Perfdata.Template
+  ( ItemMap
+  , getItems
+  , parseDataType
+  , parseHostname
+  , parseTimestamp
+  , parseHostState
+  , parseMetrics
+  , perfdataFromDefaultTemplate,
+  ) where
 
 import           Data.Nagios.Perfdata.Error
 import           Data.Nagios.Perfdata.Metric
@@ -75,6 +82,9 @@ extractItems (Done _ is)       = pure $ mapItems is
 extractItems (Fail _ ctxs err) = fail $ fmtParseError ctxs err
 extractItems (Partial f)       = extractItems (f "")
 
+getItems :: ByteString -> Either ParserError ItemMap
+getItems = extractItems . parseLine
+
 -- | Called if the check output is from a service check. Returns the
 -- service-specific component of the perfdata.
 parseServiceData :: ItemMap -> Either ParserError ServicePerfdata
@@ -111,7 +121,7 @@ parseHostState = lookupOrFail "HOSTSTATE"
 
 -- | Given an item map extracted from a check result, parse and return
 -- the performance metrics (or store an error and return Nothing).
-parseMetrics :: HostOrService -> ItemMap -> Either ParserError MetricList
+parseMetrics :: HostOrService -> ItemMap -> Either ParserError [Metric]
 parseMetrics typ m =
   let typ' = case typ of Host      -> "HOST"
                          Service _ -> "SERVICE"
@@ -141,8 +151,6 @@ extractPerfdata m = do
 perfdataFromDefaultTemplate :: ByteString -> Either ParserError Perfdata
 perfdataFromDefaultTemplate s =
     getItems s >>= extractPerfdata
-  where
-    getItems = extractItems . parseLine
 
 lookupOrFail :: Monad m => ByteString -> ItemMap -> m ByteString
 lookupOrFail str m = maybe (fail $ B8.unpack str ++ "not found") pure $ M.lookup str m
